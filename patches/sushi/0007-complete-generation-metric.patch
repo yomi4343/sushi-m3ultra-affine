@@ -1,0 +1,158 @@
+--- a/src/scheduler.zig
++++ b/src/scheduler.zig
+@@ -544,6 +544,8 @@
+     /// so this matches the per-slot throughput a user actually observes
+     /// (`completion_tokens / decode_ns`).
+     decode_ns: u64,
++    /// Immutable reporting clock; internal tick accounting is preserved.
++    decode_boundary: @import("decode_metric_boundary.zig").Boundary = .{},
+     /// Actual generated ids (from legacy_gen.generated_ids). Shallow copy at
+     /// completion so the connection thread can read them without locking.
+     generated_ids: ?[]u32,
+@@ -555,6 +557,10 @@
+     /// `nonStreamingViaScheduler` (or equivalent) at completion; if the
+     /// caller doesn't consume, `Slot.deinit` frees the contents.
+     logprobs_buf: std.ArrayList(generate_mod.LogprobResult),
++
++    pub fn reportedDecodeNs(self: *const Slot) u64 {
++        return self.decode_boundary.reportedNs(self.decode_ns);
++    }
+ 
+     /// Initialize but do NOT take ownership of caches — those are allocated
+     /// inside `init` from the slot's allocator.
+@@ -4654,6 +4660,7 @@
+                 }
+                 if (slot.state == .errored or slot.cancelled.load(.acquire)) continue;
+                 slot.prefill_ns = prefill_sw.read() -| slot.prefill_interleaved_ns;
++                slot.decode_boundary.begin(@intCast(std.Io.Timestamp.now(sch.io, .awake).nanoseconds), slot.completion_tokens);
+                 if (slot.prefill_interleaved_ns > 0) log.debug("[interleave] prefill {d} ms, hosted decode {d} ms\n", .{
+                     slot.prefill_ns / std.time.ns_per_ms, slot.prefill_interleaved_ns / std.time.ns_per_ms,
+                 });
+@@ -5483,6 +5490,7 @@
+ }
+ 
+ fn finishSlot(sch: *Scheduler, slot: *Slot, reason: []const u8) void {
++    slot.decode_boundary.finish(@intCast(std.Io.Timestamp.now(sch.io, .awake).nanoseconds), slot.completion_tokens);
+     // Emit the `[spec-stats]` summary (no-op for non-speculative slots).
+     // The legacy generate() path logs this itself; scheduler-driven slots
+     // finalize here instead.
+@@ -5523,7 +5531,7 @@
+             if (latched != null) "error" else reason,
+             slot.first_token_ns,
+             slot.prefill_ns,
+-            slot.decode_ns,
++            slot.reportedDecodeNs(),
+             slot.prompt_tokens,
+             slot.completion_tokens,
+             slot.cached_tokens,
+--- a/src/server.zig
++++ b/src/server.zig
+@@ -9525,7 +9525,7 @@
+     // those instead of the old single-wall-clock approximation, which
+     // double-counted total time into both phases.
+     const prefill_tps = generate_mod.prefillTokensPerSec(slot.prompt_tokens, slot.cached_tokens, slot.prefill_ns);
+-    const decode_tps = generate_mod.tokensPerSec(slot.completion_tokens, slot.decode_ns);
++    const decode_tps = generate_mod.tokensPerSec(slot.completion_tokens, slot.reportedDecodeNs());
+ 
+     const strip_leading = tok.tok_type == .sentencepiece_bpe and (sampling.constraint == null or sampling.constraint.?.proto == null);
+     // A loop cut is a truncation, and the degenerate span is the part the
+@@ -9575,7 +9575,7 @@
+         .prefill_tps = prefill_tps,
+         .decode_tps = decode_tps,
+         .prefill_ns = slot.prefill_ns,
+-        .decode_ns = slot.decode_ns,
++        .decode_ns = slot.reportedDecodeNs(),
+         .cached_tokens = slot.cached_tokens,
+         .logprobs = logprobs_slice,
+         .finish_details = slot.finish_details,
+@@ -10063,7 +10063,7 @@
+             self.finish_reason = s.finish_reason;
+             self.finish_details = s.finish_details;
+             self.prefill_ns = s.prefill_ns;
+-            self.decode_ns = s.decode_ns;
++            self.decode_ns = s.reportedDecodeNs();
+         } else if (self.gen) |g| {
+             self.prompt_tokens = g.prompt_tokens;
+             self.completion_tokens = g.completion_tokens;
+--- /dev/null
++++ b/src/decode_metric_boundary.zig
+@@ -0,0 +1,79 @@
++const std = @import("std");
++/// Immutable reporting boundary. No controller/tick counters are changed.
++/// Time: prefill-end -> terminal decision after publishing the final counted token.
++/// Numerator: all published completion tokens (existing throughput convention),
++/// excluding un-emitted EOS and discarded suffix. First token may be produced by
++/// prefill; decode_tokens exposes the distinct post-prefill count.
++pub const Boundary = struct {
++    begin_ns: ?u64 = null,
++    end_ns: ?u64 = null,
++    prefill_tokens: u32 = 0,
++    published_tokens: u32 = 0,
++    pub fn begin(self: *Boundary, now: u64, published: u32) void {
++        if (self.begin_ns != null or self.end_ns != null) return;
++        self.begin_ns = now; self.prefill_tokens = published;
++    }
++    pub fn finish(self: *Boundary, now: u64, published: u32) void {
++        if (self.end_ns != null) return;
++        if (self.begin_ns == null) { self.begin_ns = now; self.prefill_tokens = published; }
++        self.end_ns = now; self.published_tokens = published;
++    }
++    pub fn elapsed(self: Boundary) ?u64 {
++        const end = self.end_ns orelse return null;
++        return end -| self.begin_ns.?;
++    }
++    pub fn decodeTokens(self: Boundary) u32 { return self.published_tokens -| self.prefill_tokens; }
++    pub fn reportedNs(self: Boundary, legacy_tick_ns: u64) u64 { return self.elapsed() orelse legacy_tick_ns; }
++};
++test "terminal length includes last round even when tick charge is late" {
++    var b: Boundary = .{}; b.begin(100,1);
++    // Ninety-three completed rounds charged 3290; the last round costs 37.
++    b.finish(3427,256);
++    try std.testing.expectEqual(@as(u64,3327),b.reportedNs(3290));
++    try std.testing.expectEqual(@as(u32,256),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,255),b.decodeTokens());
++    // A delayed outer charge and post-generation logging cannot change it.
++    try std.testing.expectEqual(@as(u64,3327),b.reportedNs(9000));
++    b.finish(10000,999); b.begin(20000,999);
++    try std.testing.expectEqual(@as(u64,3327),b.reportedNs(15000));
++    try std.testing.expectEqual(@as(u32,256),b.published_tokens);
++}
++test "terminal EOS counts only published prefix, not EOS or speculative suffix" {
++    var b: Boundary = .{}; b.begin(10,1);
++    const proposed = [_]u32{11,12,99,13,14}; var published:u32=1;
++    for(proposed) |token| { if(token==99) break; published+=1; }
++    b.finish(60,published);
++    try std.testing.expectEqual(@as(u32,3),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,2),b.decodeTokens());
++    try std.testing.expectEqual(@as(u64,50),b.reportedNs(30));
++}
++test "one token length stop during prefill has zero decode duration" {
++    var b: Boundary = .{}; b.finish(30,1); b.begin(40,1);
++    try std.testing.expectEqual(@as(u64,0),b.reportedNs(500));
++    try std.testing.expectEqual(@as(u32,1),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,0),b.decodeTokens());
++}
++test "EOS before first published token has no invented completion" {
++    var b: Boundary = .{}; b.finish(30,0);
++    try std.testing.expectEqual(@as(u32,0),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,0),b.decodeTokens());
++    try std.testing.expectEqual(@as(u64,0),b.reportedNs(100));
++}
++test "length stop at two tokens counts final token once" {
++    var b: Boundary = .{}; b.begin(20,1); b.finish(45,2);
++    try std.testing.expectEqual(@as(u32,2),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,1),b.decodeTokens());
++    try std.testing.expectEqual(@as(u64,25),b.reportedNs(0));
++}
++test "block length clip ignores internally accepted suffix" {
++    var b: Boundary = .{}; b.begin(20,1);
++    const block=[_]u32{2,3,4,5};var published:u32=1;
++    for(block) |_| {published+=1;if(published==3)break;}
++    b.finish(55,published);
++    try std.testing.expectEqual(@as(u32,3),b.published_tokens);
++    try std.testing.expectEqual(@as(u32,2),b.decodeTokens());
++}
++test "uncompleted report uses previous tick scope without claiming final boundary" {
++    const b:Boundary=.{};try std.testing.expect(b.elapsed()==null);
++    try std.testing.expectEqual(@as(u64,123),b.reportedNs(123));
++}
