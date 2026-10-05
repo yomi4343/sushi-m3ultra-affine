@@ -1,0 +1,117 @@
+{
+  "hardware": "Apple M3 Ultra, 96 GB unified memory",
+  "model_scope": "Original pre-weighted Qwen3.8-Flash-Next-Uncensored, mixed 3/4/8 affine group-size 64; no other checkpoint qualified",
+  "weights_included": false,
+  "goal_robustly_met": false,
+  "current_runtime": {
+    "KV8": true,
+    "chunk": 4096,
+    "prefix_entries": 0,
+    "prefix_mem": "4GB",
+    "prefix_disk": "off",
+    "SSMstride": 4096,
+    "SSMmax": 16,
+    "allocatorcache": 1073741824,
+    "MTPadaptive": true,
+    "MTPcap": 3,
+    "context": 32768,
+    "EVseed": true,
+    "lookup": false,
+    "PLD": false,
+    "costtable": false,
+    "persist": false,
+    "wired": "off",
+    "Metalops": 50,
+    "MetalMB": 50
+  },
+  "effective_ssm_stride": 0,
+  "performance_flags": [
+    "SUSHI_GEMM_PREFILL_BK32",
+    "SUSHI_MTP_QMV8_SG2",
+    "SUSHI_MOE_ALIGNED32_TAIL16",
+    "SUSHI_MOE_INDEXED_INPUT",
+    "SUSHI_QSA_QFRAG_BF16",
+    "SUSHI_PREFILL_EXPERT_REDUCE"
+  ],
+  "latest_corrected_exact_mtp": {
+    "control_wall_ms": [
+      3322.017667,
+      3329.4175
+    ],
+    "control_mean_ms": 3325.7175835,
+    "control_rate_256_over_mean_tok_s": 76.97586868773881,
+    "target_tok_s": 80,
+    "deficit_ms": 125.71758349999982,
+    "required_time_reduction_percent": 3.780164140326494,
+    "control_spread_percent": 0.22250334895280938,
+    "diagnostic_difference_percent": {
+      "DIAGa": -0.07939890966991436,
+      "DIAGb": -0.03214718246985493
+    },
+    "acceptance": {
+      "attempts": 94,
+      "accepts": 162,
+      "drafted": 265,
+      "partial_rounds": 52
+    },
+    "all_four_arms_parity": true
+  },
+  "latest_corrected_prompt_tokens": 8130,
+  "latest_corrected_completion_tokens": 256,
+  "latest_8k_cold_prefill": [
+    {
+      "arm": "corrected_control_1",
+      "prompt_n": 8130,
+      "cached_n": 0,
+      "prompt_ms": 8775.728,
+      "prompt_per_second": 926.419,
+      "predicted_n": 256,
+      "predicted_ms": 3322.018,
+      "predicted_per_second": 77.062,
+      "tokenize_ms": 2.347
+    },
+    {
+      "arm": "corrected_control_2",
+      "prompt_n": 8130,
+      "cached_n": 0,
+      "prompt_ms": 8778.053,
+      "prompt_per_second": 926.174,
+      "predicted_n": 256,
+      "predicted_ms": 3329.418,
+      "predicted_per_second": 76.89,
+      "tokenize_ms": 2.56
+    }
+  ],
+  "historical_prefill_qualification": {
+    "integrated_five_patch_qualification": {
+      "servers": 24,
+      "cells": 72,
+      "matched_pairs": 36,
+      "prefill_gain_percent_range": [
+        4.476,
+        10.555
+      ],
+      "minimum_candidate_prefill_tok_s": 915.323,
+      "compile_misses": 0,
+      "cached_tokens": 0,
+      "decode_rates_legacy_metric": true,
+      "sample_scope": "n1 perengine/mode/content/order. v1/v3 separate Sushi binaries; v3 adds optin diagnostic only; generation/controller source byteidentical and performance libraries identical. Pairengine comparisons versionmatched, crossmode bridges labeled. No statistical repeat/adoption claim."
+    },
+    "reducer_broad_qualification": {
+      "combined_servers": 48,
+      "cells": 144,
+      "matched_pairs": 72,
+      "strata": 36,
+      "positive_median_prefill_strata": 36,
+      "positive_prefill_pairs": 69,
+      "negative_prefill_pairs": 3,
+      "candidate_cold_prefill_below1000": 72,
+      "candidate_cold_prefill_total": 72,
+      "minimum_candidate_prefill_tok_s": 922.3,
+      "decode_rates_legacy_metric": true
+    },
+    "no_fresh_corrected_whole_suite_qualification": true
+  },
+  "scope": "Aggregate measurements from retained local evidence; prompts, outputs, request state and raw logs excluded. Clean package compiles and targeted CPU tests pass, but its binary has not been newly full-model/GPU qualified.",
+  "clean_source_build_verified": true
+}

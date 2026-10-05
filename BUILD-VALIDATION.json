@@ -1,0 +1,151 @@
+{
+  "at_jst": "2026-10-05T14:15:38.729549+09:00",
+  "clean_source_build_verified": true,
+  "source_pins": [
+    {
+      "name": "sushi",
+      "url": "https://github.com/beamivalice/sushi.git",
+      "pin": "711572e91c491b50b973e57045b8d4a7f5137764"
+    },
+    {
+      "name": "mlx",
+      "url": "https://github.com/ml-explore/mlx.git",
+      "pin": "d73eb752ef2e6288fd95b032c0bff0a15a4a9e93"
+    },
+    {
+      "name": "mlx-c",
+      "url": "https://github.com/ml-explore/mlx-c.git",
+      "pin": "56b2d39fc831f2c0eb5bb94d82ef7191f7b31fa6"
+    }
+  ],
+  "source_patch_count": 7,
+  "MLX_MLXC_and_Sushi_fresh_compiled": true,
+  "dependency_scope": "Existing trusted offline CMake dependencies, upstream tracked Jinja static archive and installed WebP/Xcode/Zig; no new software or network dependency fetch.",
+  "binary_sha256": "c2bfac9b20ee2a4710f8d957788faf99634927f834bd40d0817678b1154668ad",
+  "library_hashes": [
+    {
+      "name": "libmlx.dylib",
+      "sha256": "5f643bc5a5cb2bb51a7c327285d9db38000d4d030626d1a76c4a2edb330111c8",
+      "bytes": 22261424
+    },
+    {
+      "name": "libmlxc.dylib",
+      "sha256": "2e430e0f96ad00f24086225ec606eb32d3933d9c54fb153cde9e630a9596ab1f",
+      "bytes": 1215184
+    },
+    {
+      "name": "mlx.metallib",
+      "sha256": "6c248505dd862d0831a426abeac95d1fd17ae6f3255492f4dd0d860c56608918",
+      "bytes": 183495248
+    }
+  ],
+  "actual_new_library_load_verified": true,
+  "version_lines": [
+    "sushi 1.1.1",
+    "mlx 0.32.3",
+    "mlx-c 56b2d39fc831"
+  ],
+  "completed_stages": [
+    {
+      "stage": "01-mlx-configure",
+      "exit_code": 0,
+      "seconds": 2.136888875,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "02-mlx-build",
+      "exit_code": 0,
+      "seconds": 119.48185225,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "03-mlx-install",
+      "exit_code": 0,
+      "seconds": 2.1523957499999997,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "04-mlxc-configure",
+      "exit_code": 0,
+      "seconds": 2.1443425830000002,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "05-mlxc-build",
+      "exit_code": 0,
+      "seconds": 4.293485167,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "06-mlxc-install",
+      "exit_code": 0,
+      "seconds": 2.1392311669999997,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "08-sushi-build",
+      "exit_code": 0,
+      "seconds": 163.967238083,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "10-metric-helper-test",
+      "exit_code": 0,
+      "seconds": 2.1874044169999998,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "16-real-reducer-CPU-test",
+      "exit_code": 0,
+      "seconds": 10.727045292,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "17-real-ngram-header-CPU-tests",
+      "exit_code": 0,
+      "seconds": 8.537894875,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "18-real-BF16-ngram-CPU-test",
+      "exit_code": 0,
+      "seconds": 8.54785,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "19-real-Qwen-config-CPU-test",
+      "exit_code": 0,
+      "seconds": 8.539558792,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "14-CLI-version",
+      "exit_code": 0,
+      "seconds": 2.139561041,
+      "guard_seconds": 300
+    },
+    {
+      "stage": "20-CLI-guest-manifest",
+      "exit_code": 0,
+      "seconds": 2.140349375,
+      "guard_seconds": 300
+    }
+  ],
+  "targeted_CPU_cases": {
+    "metric_boundary": 7,
+    "reducer_dispatch": 1,
+    "ngram_header": 3,
+    "BF16_ngram_gather": 1,
+    "Qwen_config": 1
+  },
+  "targeted_CPU_cases_total": 13,
+  "auxiliary_EXL3_test_artifact_passes": 4,
+  "zero_test_filtered_upstream_attempts_excluded_from_test_count": true,
+  "no_full_model_load": true,
+  "no_inference_kernel_workload": true,
+  "CLI_Metal_device_discovery": true,
+  "no_server": true,
+  "no_new_performance_measurement": true,
+  "portable_deterministic_build_verified": false,
+  "full_model_GPU_qualification_verified": false
+}

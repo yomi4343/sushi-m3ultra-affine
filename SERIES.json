@@ -1,0 +1,71 @@
+{
+  "repositories": [
+    {
+      "name": "sushi",
+      "url": "https://github.com/beamivalice/sushi.git",
+      "pin": "711572e91c491b50b973e57045b8d4a7f5137764"
+    },
+    {
+      "name": "mlx",
+      "url": "https://github.com/ml-explore/mlx.git",
+      "pin": "d73eb752ef2e6288fd95b032c0bff0a15a4a9e93"
+    },
+    {
+      "name": "mlx-c",
+      "url": "https://github.com/ml-explore/mlx-c.git",
+      "pin": "56b2d39fc831f2c0eb5bb94d82ef7191f7b31fa6"
+    }
+  ],
+  "patches": [
+    {
+      "repository": "mlx",
+      "path": "patches/mlx/0001-bk32.patch",
+      "sha256": "ae902399815cbc76e03eddf8bb1e44677dc45b8aa289367f1a1d20ef710fd563",
+      "origin_sha256": "ae902399815cbc76e03eddf8bb1e44677dc45b8aa289367f1a1d20ef710fd563",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "mlx-c",
+      "path": "patches/mlx-c/0002-sg2.patch",
+      "sha256": "664ec9bbc4a8c0cce043e4b004ac72424c93a809b8183599db7256e0ba792694",
+      "origin_sha256": "664ec9bbc4a8c0cce043e4b004ac72424c93a809b8183599db7256e0ba792694",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "mlx-c",
+      "path": "patches/mlx-c/0003-aligned32-tail16.patch",
+      "sha256": "5e499fbc710434b1555a42e92d27ef77c4fefd4a6f09cf146c7aca33d21802b5",
+      "origin_sha256": "5e499fbc710434b1555a42e92d27ef77c4fefd4a6f09cf146c7aca33d21802b5",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "mlx-c",
+      "path": "patches/mlx-c/0004-indexed-input.patch",
+      "sha256": "aff95e81229fca5b08f3756dd38c534fdeb6a38f272d66735982cc3f2a60ff3a",
+      "origin_sha256": "aff95e81229fca5b08f3756dd38c534fdeb6a38f272d66735982cc3f2a60ff3a",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "mlx-c",
+      "path": "patches/mlx-c/0005-stock-qfrag.patch",
+      "sha256": "cde844bf7ecc238a70770278e5097d2ff1eca3ca91db34486c5c2a32fc6e3501",
+      "origin_sha256": "cde844bf7ecc238a70770278e5097d2ff1eca3ca91db34486c5c2a32fc6e3501",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "sushi",
+      "path": "patches/sushi/0006-prefill-expert-reduce.patch",
+      "sha256": "351261f6ee5dd93bbf4dd85036e07107930f8ab0840079150a664bf760b199c5",
+      "origin_sha256": "351261f6ee5dd93bbf4dd85036e07107930f8ab0840079150a664bf760b199c5",
+      "kind": "retained-performance"
+    },
+    {
+      "repository": "sushi",
+      "path": "patches/sushi/0007-complete-generation-metric.patch",
+      "sha256": "b2e4f86c0559a0fc4bf865ef3710f93317030dd59cd43fd51a7c6db8b8225bb7",
+      "kind": "reporting-only-rebase",
+      "helper_sha256": "f07f9e3e15dba59a334f0dd96001d97936095c8159f7d13b0f8ca6c168198a04",
+      "fresh_full_build_verified": false
+    }
+  ]
+}
