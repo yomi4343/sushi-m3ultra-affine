@@ -1,0 +1,126 @@
+--- a/src/transformer.zig
++++ b/src/transformer.zig
+@@ -31333,7 +31333,10 @@
+             // indexes — the bias must be added before the inverse permutation.
+             try self.addExpertBias(&down_squeezed, mw.switch_down_bias, sorted_inds);
+ 
+-            const fused_sum = if (self.verifyFeatureEnabled(.down_reduce, skip_shared, B, S))
++            const prefill_reduce = prefillExpertReduceEligible(prefillExpertReduceEnabled(), self.qwen4 != null, skip_shared, B, S);
++            const fused_sum = if (prefill_reduce)
++                try prefillExpertReduce(self.s, down_squeezed, inv_order, norm_scores)
++            else if (self.verifyFeatureEnabled(.down_reduce, skip_shared, B, S))
+                 try verifyExpertReduce(self.s, down_squeezed, inv_order, norm_scores)
+             else
+                 null;
+@@ -31341,7 +31344,7 @@
+                 _ = mlx.mlx_array_free(down_out);
+                 down_out = value;
+                 moe_reduced = true;
+-                mtp_verify_expert_reduce_calls +%= 1;
++                if (!prefill_reduce) mtp_verify_expert_reduce_calls +%= 1;
+                 const Once = struct {
+                     var logged = false;
+                 };
+@@ -40692,7 +40695,12 @@
+ var verify_expert_reduce_cfgs = QsaCfgCache(c_int, 1){};
+ 
+ fn verifyExpertReduce(s: mlx.mlx_stream, down: mlx.mlx_array, inverse: mlx.mlx_array, scores: mlx.mlx_array) !?mlx.mlx_array {
+-    if (!mlx.streamIsGpu(s) or !verifySharedHardware()) return null;
++    if (!verifySharedHardware()) return null;
++    return expertReduceForWidth(s, down, inverse, scores, 32);
++}
++
++fn expertReduceForWidth(s: mlx.mlx_stream, down: mlx.mlx_array, inverse: mlx.mlx_array, scores: mlx.mlx_array, max_tokens: c_int) !?mlx.mlx_array {
++    if (!mlx.streamIsGpu(s)) return null;
+     if (down.ctx == null or inverse.ctx == null or scores.ctx == null) return null;
+     if (mlx.mlx_array_dtype(down) != .bfloat16 or mlx.mlx_array_dtype(scores) != .bfloat16 or mlx.mlx_array_dtype(inverse) != .uint32) return null;
+     const ds = mlx.getShape(down);
+@@ -40700,7 +40708,7 @@
+     const ix = mlx.getShape(inverse);
+     if (ds.len != 2 or ds[1] != 2560 or ss.len != 3 or ss[0] != 1 or ss[2] != 10 or ix.len != 1) return null;
+     const tokens = ss[1];
+-    if (tokens < 2 or tokens > 32 or ds[0] != tokens * 10 or ix[0] != ds[0]) return null;
++    if (tokens < 2 or tokens > max_tokens or ds[0] != tokens * 10 or ix[0] != ds[0]) return null;
+     const kernel = blk: {
+         if (verify_expert_reduce_kernel) |value| break :blk value;
+         const ins = [_][*:0]const u8{ "down", "inverse", "scores" };
+@@ -40735,6 +40743,79 @@
+     errdefer _ = mlx.mlx_array_free(result);
+     try mlx.check(mlx.mlx_vector_array_get(&result, ov, 0));
+     return result;
++}
++
++fn prefillExpertReduce(s: mlx.mlx_stream, down: mlx.mlx_array, inverse: mlx.mlx_array, scores: mlx.mlx_array) !?mlx.mlx_array {
++    if (!mlx.streamIsGpu(s)) return null;
++    return expertReduceForWidth(s, down, inverse, scores, 4096);
++}
++
++fn prefillExpertReduceEligible(enabled: bool, qwen4: bool, grouped: bool, batch: c_int, width: c_int) bool {
++    return enabled and qwen4 and !grouped and batch == 1 and width >= 32 and width <= 4096;
++}
++
++fn prefillExpertReduceFlag(raw: ?[]const u8) bool {
++    return if (raw) |value| std.mem.eql(u8, value, "1") else false;
++}
++
++fn prefillExpertReduceEnabled() bool {
++    const Flag = struct { var cached: ?bool = null; };
++    if (Flag.cached) |value| return value;
++    const raw: ?[]const u8 = if (std.c.getenv("SUSHI_PREFILL_EXPERT_REDUCE")) |value| std.mem.span(value) else null;
++    var arch_buf: [128]u8 = undefined;
++    const arch = gpuArchitecture(&arch_buf) orelse "";
++    const enabled = prefillExpertReduceFlag(raw) and std.mem.eql(u8, arch, "applegpu_g15d");
++    Flag.cached = enabled;
++    return enabled;
++}
++
++test "prefill expert reduction: defaultOFF and restricted dispatch" {
++    const t = std.testing;
++    try t.expect(!prefillExpertReduceFlag(null));
++    try t.expect(!prefillExpertReduceFlag("0"));
++    try t.expect(!prefillExpertReduceFlag("true"));
++    try t.expect(prefillExpertReduceFlag("1"));
++    for ([_]bool{false,true}) |enabled| for ([_]bool{false,true}) |qwen4| for ([_]bool{false,true}) |grouped| for ([_]c_int{1,2}) |batch| for ([_]c_int{1,6,31,32,33,4096,4097}) |width| {
++        try t.expectEqual(enabled and qwen4 and !grouped and batch == 1 and width >= 32 and width <= 4096, prefillExpertReduceEligible(enabled,qwen4,grouped,batch,width));
++    };
++}
++
++test "prefill expert reduction: large-width bitexact reference" {
++    if (mlx.noGpuBackend()) return error.SkipZigTest;
++    const s = mlx.gpuStream();
++    var prng = std.Random.DefaultPrng.init(0x20261004);
++    for ([_]c_int{ 32, 33, 127, 820, 3240, 4096 }) |tokens| {
++        const count = tokens * 10;
++        const down = try attn256RandBf16(prng.random(), &.{ count, 2560 }, s);
++        defer _ = mlx.mlx_array_free(down);
++        const scores = try attn256RandBf16(prng.random(), &.{ 1, tokens, 10 }, s);
++        defer _ = mlx.mlx_array_free(scores);
++        const perm = try std.testing.allocator.alloc(u32, @intCast(count));
++        defer std.testing.allocator.free(perm);
++        for (perm, 0..) |*id, i| id.* = @intCast(i);
++        prng.random().shuffle(u32, perm);
++        const inverse = mlx.mlx_array_new_data(perm.ptr, &.{count}, 1, .uint32);
++        defer _ = mlx.mlx_array_free(inverse);
++        if (tokens == 32) {
++            try std.testing.expect((try prefillExpertReduce(s, down, inverse, .{})) == null);
++            const cpu = mlx.mlx_default_cpu_stream_new();
++            defer _ = mlx.mlx_stream_free(cpu);
++            try std.testing.expect((try prefillExpertReduce(cpu, down, inverse, scores)) == null);
++            var signed = mlx.mlx_array_new();
++            defer _ = mlx.mlx_array_free(signed);
++            try mlx.check(mlx.mlx_astype(&signed, inverse, .int32, s));
++            try std.testing.expect((try prefillExpertReduce(s, down, signed, scores)) == null);
++            var large = mlx.mlx_array_new();
++            defer _ = mlx.mlx_array_free(large);
++            try mlx.check(mlx.mlx_zeros(&large, &.{1,4097,10}, 3, .bfloat16, s));
++            try std.testing.expect((try prefillExpertReduce(s, down, inverse, large)) == null);
++        }
++        const expected = try expertReduceReference(s, down, inverse, scores);
++        defer _ = mlx.mlx_array_free(expected);
++        const actual = (try prefillExpertReduce(s, down, inverse, scores)) orelse return error.PrefillExpertReduceDeclined;
++        defer _ = mlx.mlx_array_free(actual);
++        try std.testing.expect(try qsaArraysAllEqual(expected, actual, s));
++    }
+ }
+ 
+ // MLX affine qmv-fast reduction, with one 3-bit weight read serving two rows.
