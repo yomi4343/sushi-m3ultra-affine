@@ -1,0 +1,448 @@
+--- a/mlx/c/fast.cpp
++++ b/mlx/c/fast.cpp
+@@ -443,6 +443,445 @@
+     bool ensure_row_contiguous,
+     bool atomic_outputs) {
+   auto standard=mlx::core::fast::metal_kernel(name,input_names,output_names,source,header,ensure_row_contiguous,atomic_outputs);
++  if(const char* opt=std::getenv("SUSHI_QSA_QFRAG_BF16");opt&&std::string(opt)=="1"&&(name=="sushi_attn_qsa256"||name=="sushi_attn_qsa256_packed")) {
++    const std::string expected=R"QSABASE(constexpr int BD = 256;
++constexpr int LDK = BK + 8;
++constexpr int LDV = BD + 8;
++constexpr int NT = 32 * NSG;
++constexpr int KT = BK / 8;
++
++const int qL = q_shape[2];
++const int kL = k_shape[2];
++const int Hq = q_shape[1];
++const int Hk = k_shape[1];
++const int gqa = Hq / Hk;
++const int KB = blocks_shape[2];
++
++const int s = int(threadgroup_position_in_grid.x);
++const int hk = int(threadgroup_position_in_grid.y);
++const int bb = int(threadgroup_position_in_grid.z);
++const ushort lane = ushort(thread_index_in_simdgroup);
++const ushort warp = ushort(simdgroup_index_in_threadgroup);
++const int tix = int(thread_index_in_threadgroup);
++
++const float scale_log2e = scl[0] * 1.44269504088896340736f;
++// Query s sits at absolute key position p (bottom-right aligned). Its
++// visible keys: `count` complete blocks, then the tail [tail_start, p].
++const int p = (kL - qL) + s;
++const int complete = (p + 1) / RATIO;
++const int count = metal::min(complete, KB);
++const int sel_len = count * RATIO;
++const int tail_start = complete * RATIO;
++const int L = sel_len + (p + 1 - tail_start);
++
++const device int* blk = blocks + (long)bb * blocks_strides[0] + (long)s * blocks_strides[1];
++#if QSA_PACKED
++const device uint32_t* Kp = k + bb * k_strides[0] + hk * k_strides[1];
++const device uint32_t* Vp = v + bb * v_strides[0] + hk * v_strides[1];
++const device T* Kscp = ksc + bb * ksc_strides[0] + hk * ksc_strides[1];
++const device T* Kbip = kbi + bb * kbi_strides[0] + hk * kbi_strides[1];
++const device T* Vscp = vsc + bb * vsc_strides[0] + hk * vsc_strides[1];
++const device T* Vbip = vbi + bb * vbi_strides[0] + hk * vbi_strides[1];
++#else
++const device T* Kp = k + bb * k_strides[0] + hk * k_strides[1];
++const device T* Vp = v + bb * v_strides[0] + hk * v_strides[1];
++#endif
++
++threadgroup T KVs[LDK * BD];
++threadgroup T* Ks = KVs;
++threadgroup T* Vs = KVs;
++
++const short2 sc = sushi_coord(lane);
++const short sn = sc.x;
++const short sm = sc.y;
++const short tm = 8 * short(warp);
++const int Ks_off = sm * LDK + sn;
++const int Vs_off = sm * LDV + sn;
++const int row = tm + sm;
++const bool row_ok = row < gqa;
++
++float2 Qfrag[BD / 8];
++if (row_ok) {
++  const device T* Qrow = q + bb * q_strides[0] + (long)(hk * gqa + row) * q_strides[1] + (long)s * q_strides[2];
++  for (int dd = 0; dd < BD / 8; ++dd) {
++    const vec<T, 2> pr = *((const device vec<T, 2>*)(Qrow + dd * 8 + sn));
++    Qfrag[dd] = float2(float(pr.x), float(pr.y));
++  }
++} else {
++  for (int dd = 0; dd < BD / 8; ++dd) Qfrag[dd] = float2(0.0f);
++}
++float2 Ofrag[BD / 8];
++for (int i = 0; i < BD / 8; ++i) Ofrag[i] = float2(0.0f);
++float max_score = -3.0e38f;
++float sum_score = 0.0f;
++
++for (int t0 = 0; t0 < L; t0 += BK) {
++  const int rows_k = metal::min(BK, L - t0);
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int i = tix; i < BK * (BD / 8); i += NT) {
++    const int r = i >> 5;
++    const int c8 = i & 31;
++    uint4 w = uint4(0);
++    if (r < rows_k) {
++      const int pos = sushi_qsa_pos(blk, t0 + r, sel_len, tail_start, RATIO);
++#if QSA_PACKED
++      w = sushi_qsa_unpack8<T, BITS, GS>(Kp + (long)pos * k_strides[2], Kscp + (long)pos * ksc_strides[2], Kbip + (long)pos * kbi_strides[2], c8);
++#else
++      w = *((const device uint4*)(Kp + (long)pos * k_strides[2]) + c8);
++#endif
++    }
++    thread T* e = (thread T*)&w;
++    const int cb = c8 * 8;
++    for (int j = 0; j < 8; ++j) Ks[(cb + j) * LDK + r] = e[j];
++  }
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++
++  float2 Sfrag[KT];
++  for (int i = 0; i < KT; ++i) Sfrag[i] = float2(0.0f);
++  for (int dd = 0; dd < BD / 8; ++dd) {
++    const float2 qf = Qfrag[dd];
++    const int kbase = Ks_off + dd * 8 * LDK;
++    for (int kt = 0; kt < KT; ++kt) {
++      const float2 kf = float2(float(Ks[kbase + kt * 8]), float(Ks[kbase + kt * 8 + 1]));
++      sushi_mma(Sfrag[kt], qf, kf);
++    }
++  }
++  for (int kt = 0; kt < KT; ++kt) Sfrag[kt] *= scale_log2e;
++  if (rows_k < BK) {
++    for (int kt = 0; kt < KT; ++kt) {
++      if (kt * 8 + sn >= rows_k) Sfrag[kt].x = -INFINITY;
++      if (kt * 8 + sn + 1 >= rows_k) Sfrag[kt].y = -INFINITY;
++    }
++  }
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int i = tix; i < BK * (BD / 8); i += NT) {
++    const int r = i >> 5;
++    const int c8 = i & 31;
++    uint4 w = uint4(0);
++    if (r < rows_k) {
++      const int pos = sushi_qsa_pos(blk, t0 + r, sel_len, tail_start, RATIO);
++#if QSA_PACKED
++      w = sushi_qsa_unpack8<T, BITS, GS>(Vp + (long)pos * v_strides[2], Vscp + (long)pos * vsc_strides[2], Vbip + (long)pos * vbi_strides[2], c8);
++#else
++      w = *((const device uint4*)(Vp + (long)pos * v_strides[2]) + c8);
++#endif
++    }
++    *((threadgroup uint4*)(Vs + r * LDV) + c8) = w;
++  }
++
++  float new_max = max_score;
++  for (int kt = 0; kt < KT; ++kt) new_max = metal::max(new_max, sushi_row_max(Sfrag[kt]));
++  float rowsum = 0.0f;
++  for (int kt = 0; kt < KT; ++kt) {
++    Sfrag[kt] = metal::exp2(Sfrag[kt] - new_max);
++    rowsum += sushi_row_sum(Sfrag[kt]);
++  }
++  const float factor = metal::exp2(max_score - new_max);
++  max_score = new_max;
++  sum_score = sum_score * factor + rowsum;
++  for (int i = 0; i < BD / 8; ++i) Ofrag[i] *= factor;
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int id = 0; id < BD / 8; ++id) {
++    const int vbase = Vs_off + id * 8;
++    for (int kt = 0; kt < KT; ++kt) {
++      const float2 vf = float2(float(Vs[vbase + kt * 8 * LDV]), float(Vs[vbase + kt * 8 * LDV + 1]));
++      sushi_mma(Ofrag[id], Sfrag[kt], vf);
++    }
++  }
++}
++
++if (row_ok) {
++  const float inv = 1.0f / sum_score;
++  device T* Optr = out + (((long)bb * Hq + (hk * gqa + row)) * (long)qL + (long)s) * BD + sn;
++  for (int id = 0; id < BD / 8; ++id) {
++    Optr[id * 8] = T(Ofrag[id].x * inv);
++    Optr[id * 8 + 1] = T(Ofrag[id].y * inv);
++  }
++})QSABASE";
++    const std::string dense_header=R"QSAHEAD(#include <metal_simdgroup_matrix>
++
++// Fragment layout mirrors MLX steel BaseMMAFrag<float,8,8>: each thread
++// of a simdgroup holds 2 adjacent elements of an 8x8 tile; the hardware
++// mma runs on simdgroup_float8x8 built from those elements. The 4 threads
++// holding one row differ in lane bits 0 and 3 (see sushi_coord).
++inline short2 sushi_coord(ushort lane) {
++  const short qid = lane / 4;
++  const short fm = (qid & 4) + ((lane / 2) % 4);
++  const short fn = (qid & 2) * 2 + (lane % 2) * 2;
++  return short2(fn, fm);
++}
++
++inline void sushi_mma(thread float2 &d, float2 a, float2 b) {
++  metal::simdgroup_float8x8 D, A, B, C;
++  A.thread_elements()[0] = a.x;
++  A.thread_elements()[1] = a.y;
++  B.thread_elements()[0] = b.x;
++  B.thread_elements()[1] = b.y;
++  C.thread_elements()[0] = d.x;
++  C.thread_elements()[1] = d.y;
++  simdgroup_multiply_accumulate(D, A, B, C);
++  d.x = D.thread_elements()[0];
++  d.y = D.thread_elements()[1];
++}
++
++inline float sushi_row_max(float2 v) {
++  float t = metal::max(v.x, v.y);
++  t = metal::max(t, metal::simd_shuffle_xor(t, ushort(1)));
++  t = metal::max(t, metal::simd_shuffle_xor(t, ushort(8)));
++  return t;
++}
++
++inline float sushi_row_sum(float2 v) {
++  float t = v.x + v.y;
++  t += metal::simd_shuffle_xor(t, ushort(1));
++  t += metal::simd_shuffle_xor(t, ushort(8));
++  return t;
++}
++inline int sushi_qsa_pos(const device int* blk, int vi, int sel_len, int tail_start, int ratio) {
++  const int b = vi / ratio;
++  return (vi < sel_len) ? (blk[b] * ratio + (vi - b * ratio)) : (tail_start + (vi - sel_len));
++}
++)QSAHEAD";
++    const std::string packed_header=R"QSAPACK(#define QSA_PACKED 1
++template <typename T, int BITS, int GS>
++inline uint4 sushi_qsa_unpack8(const device uint32_t* wq, const device T* sc, const device T* bi, int c8) {
++  constexpr int VPW = 32 / BITS;
++  constexpr int NW = 8 / VPW;
++  constexpr uint MASKB = (1u << BITS) - 1u;
++  const int g = (c8 * 8) / GS;
++  const float sj = float(sc[g]);
++  const float bj = float(bi[g]);
++  uint4 out = uint4(0);
++  thread T* e = (thread T*)&out;
++  for (int wj = 0; wj < NW; ++wj) {
++    const uint w = wq[c8 * NW + wj];
++    for (int u = 0; u < VPW; ++u) e[wj * VPW + u] = T(float((w >> (u * BITS)) & MASKB) * sj + bj);
++  }
++  return out;
++}
++#include <metal_simdgroup_matrix>
++
++// Fragment layout mirrors MLX steel BaseMMAFrag<float,8,8>: each thread
++// of a simdgroup holds 2 adjacent elements of an 8x8 tile; the hardware
++// mma runs on simdgroup_float8x8 built from those elements. The 4 threads
++// holding one row differ in lane bits 0 and 3 (see sushi_coord).
++inline short2 sushi_coord(ushort lane) {
++  const short qid = lane / 4;
++  const short fm = (qid & 4) + ((lane / 2) % 4);
++  const short fn = (qid & 2) * 2 + (lane % 2) * 2;
++  return short2(fn, fm);
++}
++
++inline void sushi_mma(thread float2 &d, float2 a, float2 b) {
++  metal::simdgroup_float8x8 D, A, B, C;
++  A.thread_elements()[0] = a.x;
++  A.thread_elements()[1] = a.y;
++  B.thread_elements()[0] = b.x;
++  B.thread_elements()[1] = b.y;
++  C.thread_elements()[0] = d.x;
++  C.thread_elements()[1] = d.y;
++  simdgroup_multiply_accumulate(D, A, B, C);
++  d.x = D.thread_elements()[0];
++  d.y = D.thread_elements()[1];
++}
++
++inline float sushi_row_max(float2 v) {
++  float t = metal::max(v.x, v.y);
++  t = metal::max(t, metal::simd_shuffle_xor(t, ushort(1)));
++  t = metal::max(t, metal::simd_shuffle_xor(t, ushort(8)));
++  return t;
++}
++
++inline float sushi_row_sum(float2 v) {
++  float t = v.x + v.y;
++  t += metal::simd_shuffle_xor(t, ushort(1));
++  t += metal::simd_shuffle_xor(t, ushort(8));
++  return t;
++}
++inline int sushi_qsa_pos(const device int* blk, int vi, int sel_len, int tail_start, int ratio) {
++  const int b = vi / ratio;
++  return (vi < sel_len) ? (blk[b] * ratio + (vi - b * ratio)) : (tail_start + (vi - sel_len));
++}
++)QSAPACK";
++    const std::string alternative=R"QSAALT(constexpr int BD = 256;
++constexpr int LDK = BK + 8;
++constexpr int LDV = BD + 8;
++constexpr int NT = 32 * NSG;
++constexpr int KT = BK / 8;
++
++const int qL = q_shape[2];
++const int kL = k_shape[2];
++const int Hq = q_shape[1];
++const int Hk = k_shape[1];
++const int gqa = Hq / Hk;
++const int KB = blocks_shape[2];
++
++const int s = int(threadgroup_position_in_grid.x);
++const int hk = int(threadgroup_position_in_grid.y);
++const int bb = int(threadgroup_position_in_grid.z);
++const ushort lane = ushort(thread_index_in_simdgroup);
++const ushort warp = ushort(simdgroup_index_in_threadgroup);
++const int tix = int(thread_index_in_threadgroup);
++
++const float scale_log2e = scl[0] * 1.44269504088896340736f;
++// Query s sits at absolute key position p (bottom-right aligned). Its
++// visible keys: `count` complete blocks, then the tail [tail_start, p].
++const int p = (kL - qL) + s;
++const int complete = (p + 1) / RATIO;
++const int count = metal::min(complete, KB);
++const int sel_len = count * RATIO;
++const int tail_start = complete * RATIO;
++const int L = sel_len + (p + 1 - tail_start);
++
++const device int* blk = blocks + (long)bb * blocks_strides[0] + (long)s * blocks_strides[1];
++#if QSA_PACKED
++const device uint32_t* Kp = k + bb * k_strides[0] + hk * k_strides[1];
++const device uint32_t* Vp = v + bb * v_strides[0] + hk * v_strides[1];
++const device T* Kscp = ksc + bb * ksc_strides[0] + hk * ksc_strides[1];
++const device T* Kbip = kbi + bb * kbi_strides[0] + hk * kbi_strides[1];
++const device T* Vscp = vsc + bb * vsc_strides[0] + hk * vsc_strides[1];
++const device T* Vbip = vbi + bb * vbi_strides[0] + hk * vbi_strides[1];
++#else
++const device T* Kp = k + bb * k_strides[0] + hk * k_strides[1];
++const device T* Vp = v + bb * v_strides[0] + hk * v_strides[1];
++#endif
++
++threadgroup T KVs[LDK * BD];
++threadgroup T* Ks = KVs;
++threadgroup T* Vs = KVs;
++
++const short2 sc = sushi_coord(lane);
++const short sn = sc.x;
++const short sm = sc.y;
++const short tm = 8 * short(warp);
++const int Ks_off = sm * LDK + sn;
++const int Vs_off = sm * LDV + sn;
++const int row = tm + sm;
++const bool row_ok = row < gqa;
++
++vec<T, 2> Qfrag[BD / 8];
++if (row_ok) {
++  const device T* Qrow = q + bb * q_strides[0] + (long)(hk * gqa + row) * q_strides[1] + (long)s * q_strides[2];
++  for (int dd = 0; dd < BD / 8; ++dd) {
++    const vec<T, 2> pr = *((const device vec<T, 2>*)(Qrow + dd * 8 + sn));
++    Qfrag[dd] = pr;
++  }
++} else {
++  for (int dd = 0; dd < BD / 8; ++dd) Qfrag[dd] = vec<T, 2>(T(0.0f));
++}
++float2 Ofrag[BD / 8];
++for (int i = 0; i < BD / 8; ++i) Ofrag[i] = float2(0.0f);
++float max_score = -3.0e38f;
++float sum_score = 0.0f;
++
++for (int t0 = 0; t0 < L; t0 += BK) {
++  const int rows_k = metal::min(BK, L - t0);
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int i = tix; i < BK * (BD / 8); i += NT) {
++    const int r = i >> 5;
++    const int c8 = i & 31;
++    uint4 w = uint4(0);
++    if (r < rows_k) {
++      const int pos = sushi_qsa_pos(blk, t0 + r, sel_len, tail_start, RATIO);
++#if QSA_PACKED
++      w = sushi_qsa_unpack8<T, BITS, GS>(Kp + (long)pos * k_strides[2], Kscp + (long)pos * ksc_strides[2], Kbip + (long)pos * kbi_strides[2], c8);
++#else
++      w = *((const device uint4*)(Kp + (long)pos * k_strides[2]) + c8);
++#endif
++    }
++    thread T* e = (thread T*)&w;
++    const int cb = c8 * 8;
++    for (int j = 0; j < 8; ++j) Ks[(cb + j) * LDK + r] = e[j];
++  }
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++
++  float2 Sfrag[KT];
++  for (int i = 0; i < KT; ++i) Sfrag[i] = float2(0.0f);
++  for (int dd = 0; dd < BD / 8; ++dd) {
++    const float2 qf = float2(float(Qfrag[dd].x), float(Qfrag[dd].y));
++    const int kbase = Ks_off + dd * 8 * LDK;
++    for (int kt = 0; kt < KT; ++kt) {
++      const float2 kf = float2(float(Ks[kbase + kt * 8]), float(Ks[kbase + kt * 8 + 1]));
++      sushi_mma(Sfrag[kt], qf, kf);
++    }
++  }
++  for (int kt = 0; kt < KT; ++kt) Sfrag[kt] *= scale_log2e;
++  if (rows_k < BK) {
++    for (int kt = 0; kt < KT; ++kt) {
++      if (kt * 8 + sn >= rows_k) Sfrag[kt].x = -INFINITY;
++      if (kt * 8 + sn + 1 >= rows_k) Sfrag[kt].y = -INFINITY;
++    }
++  }
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int i = tix; i < BK * (BD / 8); i += NT) {
++    const int r = i >> 5;
++    const int c8 = i & 31;
++    uint4 w = uint4(0);
++    if (r < rows_k) {
++      const int pos = sushi_qsa_pos(blk, t0 + r, sel_len, tail_start, RATIO);
++#if QSA_PACKED
++      w = sushi_qsa_unpack8<T, BITS, GS>(Vp + (long)pos * v_strides[2], Vscp + (long)pos * vsc_strides[2], Vbip + (long)pos * vbi_strides[2], c8);
++#else
++      w = *((const device uint4*)(Vp + (long)pos * v_strides[2]) + c8);
++#endif
++    }
++    *((threadgroup uint4*)(Vs + r * LDV) + c8) = w;
++  }
++
++  float new_max = max_score;
++  for (int kt = 0; kt < KT; ++kt) new_max = metal::max(new_max, sushi_row_max(Sfrag[kt]));
++  float rowsum = 0.0f;
++  for (int kt = 0; kt < KT; ++kt) {
++    Sfrag[kt] = metal::exp2(Sfrag[kt] - new_max);
++    rowsum += sushi_row_sum(Sfrag[kt]);
++  }
++  const float factor = metal::exp2(max_score - new_max);
++  max_score = new_max;
++  sum_score = sum_score * factor + rowsum;
++  for (int i = 0; i < BD / 8; ++i) Ofrag[i] *= factor;
++
++  threadgroup_barrier(metal::mem_flags::mem_threadgroup);
++  for (int id = 0; id < BD / 8; ++id) {
++    const int vbase = Vs_off + id * 8;
++    for (int kt = 0; kt < KT; ++kt) {
++      const float2 vf = float2(float(Vs[vbase + kt * 8 * LDV]), float(Vs[vbase + kt * 8 * LDV + 1]));
++      sushi_mma(Ofrag[id], Sfrag[kt], vf);
++    }
++  }
++}
++
++if (row_ok) {
++  const float inv = 1.0f / sum_score;
++  device T* Optr = out + (((long)bb * Hq + (hk * gqa + row)) * (long)qL + (long)s) * BD + sn;
++  for (int id = 0; id < BD / 8; ++id) {
++    Optr[id * 8] = T(Ofrag[id].x * inv);
++    Optr[id * 8 + 1] = T(Ofrag[id].y * inv);
++  }
++})QSAALT";
++    const bool packed=name=="sushi_attn_qsa256_packed";
++    if(source!=expected||header!=(packed?packed_header:dense_header)||ensure_row_contiguous||atomic_outputs||output_names!=std::vector<std::string>{"out"}||input_names!=(packed?std::vector<std::string>{"q","k","v","scl","blocks","ksc","kbi","vsc","vbi"}:std::vector<std::string>{"q","k","v","scl","blocks"}))throw std::runtime_error("QSAqfrag source/header/flags mismatch; no substitution");
++    auto candidate=mlx::core::fast::metal_kernel(name+"_qbf16",input_names,output_names,alternative,header,ensure_row_contiguous,atomic_outputs);
++    mlx::core::fast::CustomKernelFunction selected=[standard,candidate,packed](const std::vector<mlx::core::array>& in,const std::vector<mlx::core::Shape>& shapes,const std::vector<mlx::core::Dtype>& types,std::tuple<int,int,int> grid,std::tuple<int,int,int> tg,std::vector<std::pair<std::string,mlx::core::fast::TemplateArg>> args,std::optional<float> init,bool verbose,mlx::core::StreamOrDevice stream) {
++      auto arg=[&](const std::string& key){for(const auto& p:args)if(p.first==key)if(auto v=std::get_if<int>(&p.second))return *v;return -1;};
++      bool type=false;for(const auto& p:args)if(p.first=="T")if(auto v=std::get_if<mlx::core::Dtype>(&p.second))type=*v==mlx::core::bfloat16;
++      bool admit=in.size()==(packed?9:5)&&in[0].ndim()==4&&in[1].ndim()==4&&in[0].dtype()==mlx::core::bfloat16&&in[0].shape(3)==256&&in[1].shape(1)>0&&in[0].shape(1)==in[1].shape(1)*12&&type&&arg("NSG")==2&&arg("BK")==32&&arg("KPAD")==-1&&arg("RATIO")==4&&(!packed||(arg("BITS")==8&&arg("GS")==64));
++      // Restrict substitution to this campaign's canonical BF16/affine8 geometry.
++      if(admit) {
++        const auto& q=in[0];const auto& k=in[1];const auto& v=in[2];
++        admit=v.ndim()==4 && q.shape(0)==1 && q.shape(1)==24 && k.shape(0)==1 && k.shape(1)==2 && q.shape(2)>0 && k.shape(2)>=q.shape(2) && k.shape()==v.shape() && k.dtype()==v.dtype() && k.dtype()==(packed?mlx::core::uint32:mlx::core::bfloat16) && k.shape(3)==(packed?64:256) && q.strides()[3]==1 && k.strides()[3]==1 && v.strides()[3]==1 && in[3].dtype()==mlx::core::float32 && in[3].size()==1 && in[4].dtype()==mlx::core::int32 && in[4].shape()==mlx::core::Shape({1,q.shape(2),512}) && shapes==std::vector<mlx::core::Shape>{{1,24,q.shape(2),256}} && types==std::vector<mlx::core::Dtype>{mlx::core::bfloat16} && grid==std::make_tuple(q.shape(2)*32,4,1) && tg==std::make_tuple(32,2,1);
++        if(admit && packed) for(int i:{5,6,7,8}) admit=admit && in[i].dtype()==mlx::core::bfloat16 && in[i].shape()==mlx::core::Shape({1,2,k.shape(2),4}) && in[i].strides()[3]==1;
++      }
++      if(admit) return candidate(in,shapes,types,grid,tg,args,init,verbose,stream);
++      return standard(in,shapes,types,grid,tg,args,init,verbose,stream);
++    };
++    return mlx_fast_metal_kernel({new mlx_fast_metal_kernel_cpp_(selected)});
++  }
++
+   if (const char* opt=std::getenv("SUSHI_MTP_QMV8_SG2"); opt && std::string(opt)=="1" && name=="mtp_serial_qmv8_rows") {
+     const std::string expected=R"SUSHIBODY(const uint lane = thread_index_in_simdgroup;
+ const uint sg = simdgroup_index_in_threadgroup;
