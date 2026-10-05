@@ -1,0 +1,26 @@
+--- a/mlx/backend/metal/matmul.cpp
++++ b/mlx/backend/metal/matmul.cpp
+@@ -11,6 +11,7 @@
+ #include "mlx/backend/gpu/copy.h"
+ #include "mlx/backend/metal/binary.h"
+ #include "mlx/backend/metal/device.h"
++#include <cstdlib>
+ #include "mlx/backend/metal/kernels.h"
+ #include "mlx/backend/metal/kernels/defines.h"
+ #include "mlx/backend/metal/kernels/steel/gemm/params.h"
+@@ -374,6 +375,15 @@
+   char devc = d.get_architecture().back();
+   GEMM_TPARAM_MACRO(devc)
+ 
++  const char* tuning = std::getenv("SUSHI_GEMM_PREFILL_BK32");
++  if (tuning && std::string(tuning) == "1" && out.dtype() == bfloat16 &&
++      !transpose_a && transpose_b && batch_size_out == 1 &&
++      d.get_architecture() == "applegpu_g15d" && M >= 2048 && M <= 16384 &&
++      ((K == 2560 && (N == 512 || N == 640 || N == 2560 || N == 6144 || N == 10240 || N == 12288)) ||
++       (K == 6144 && N == 2560) || (K == 640 && N == 2560) || (K == 320 && N == 10240))) {
++    bm=64; bn=32; bk=32; wm=2; wn=2;
++  }
++
+   // Prepare kernel name
+   std::ostringstream kname;
+ 
