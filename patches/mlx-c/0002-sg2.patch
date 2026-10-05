@@ -1,0 +1,179 @@
+--- a/mlx/c/fast.cpp
++++ b/mlx/c/fast.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ /* Copyright © 2023-2024 Apple Inc.                   */
+ /*                                                    */
+ /* This file is auto-generated. Do not edit manually. */
+@@ -441,15 +442,162 @@
+     const std::string& header,
+     bool ensure_row_contiguous,
+     bool atomic_outputs) {
+-  return mlx_fast_metal_kernel({new mlx_fast_metal_kernel_cpp_(
+-      mlx::core::fast::metal_kernel(
+-          name,
+-          input_names,
+-          output_names,
+-          source,
+-          header,
+-          ensure_row_contiguous,
+-          atomic_outputs))});
++  auto standard=mlx::core::fast::metal_kernel(name,input_names,output_names,source,header,ensure_row_contiguous,atomic_outputs);
++  if (const char* opt=std::getenv("SUSHI_MTP_QMV8_SG2"); opt && std::string(opt)=="1" && name=="mtp_serial_qmv8_rows") {
++    const std::string expected=R"SUSHIBODY(const uint lane = thread_index_in_simdgroup;
++const uint sg = simdgroup_index_in_threadgroup;
++const uint vec0 = threadgroup_position_in_grid.x * NV;
++const uint out_row = threadgroup_position_in_grid.y * 8u + sg * 4u;
++const int K = int(K_size);
++const int N = int(N_size);
++constexpr int VPT = FAST ? 8 : 4;
++constexpr int BLOCK = VPT * 32;
++const int groups = K / GS;
++const device uchar* ws = (const device uchar*)w + size_t(out_row) * K + lane * VPT;
++const device T* sp = sc + size_t(out_row) * groups + lane / (GS / VPT);
++const device T* bp = bi + size_t(out_row) * groups + lane / (GS / VPT);
++const device T* xp[NV];
++for (int v = 0; v < NV; ++v) xp[v] = x + size_t(min(vec0 + uint(v), uint(M - 1))) * K + lane * VPT;
++float result[NV][4] = {};
++int k = 0;
++for (; k < (FAST ? K : K - BLOCK); k += BLOCK) {
++  float xt[NV][VPT];
++  float sums[NV] = {};
++  for (int v = 0; v < NV; ++v) {
++    for (int i = 0; i < VPT; ++i) { sums[v] += xp[v][i]; xt[v][i] = xp[v][i]; }
++  }
++  for (int row = 0; row < 4; ++row) {
++    uchar codes[VPT];
++    for (int i = 0; i < VPT; ++i) codes[i] = ws[row * K + i];
++    const float scale = sp[row * groups];
++    const float bias = bp[row * groups];
++    for (int v = 0; v < NV; ++v) {
++      float accum = 0.0f;
++      for (int i = 0; i < VPT; ++i) accum += xt[v][i] * codes[i];
++      result[v][row] += scale * accum + sums[v] * bias;
++    }
++  }
++  ws += BLOCK;
++  sp += BLOCK / GS;
++  bp += BLOCK / GS;
++  for (int v = 0; v < NV; ++v) xp[v] += BLOCK;
++}
++if (!FAST) {
++  const int remaining = clamp(K - k - int(lane) * VPT, 0, VPT);
++  if (remaining > 0) {
++    float xt[NV][VPT];
++    float sums[NV] = {};
++    for (int v = 0; v < NV; ++v) {
++      for (int i = 0; i < remaining; ++i) { sums[v] += xp[v][i]; xt[v][i] = xp[v][i]; }
++    }
++    for (int row = 0; row < 4; ++row) {
++      uchar codes[VPT];
++      for (int i = 0; i < remaining; ++i) codes[i] = ws[row * K + i];
++      const float scale = sp[row * groups];
++      const float bias = bp[row * groups];
++      for (int v = 0; v < NV; ++v) {
++        float accum = 0.0f;
++        for (int i = 0; i < remaining; ++i) accum += xt[v][i] * codes[i];
++        result[v][row] += scale * accum + sums[v] * bias;
++      }
++    }
++  }
++}
++for (int v = 0; v < NV; ++v) {
++  for (int row = 0; row < 4; ++row) {
++    const float value = simd_sum(result[v][row]);
++    if (lane == 0 && vec0 + uint(v) < uint(M)) y[size_t(vec0 + uint(v)) * N + out_row + row] = T(value);
++  }
++})SUSHIBODY";
++    const std::string alternative=R"SUSHIBODY(const uint lane = thread_index_in_simdgroup;
++const uint sg = simdgroup_index_in_threadgroup;
++const uint vec0 = threadgroup_position_in_grid.x * NV;
++const uint out_row = threadgroup_position_in_grid.y * 8u + sg * 2u;
++const int K = int(K_size);
++const int N = int(N_size);
++constexpr int VPT = FAST ? 8 : 4;
++constexpr int BLOCK = VPT * 32;
++const int groups = K / GS;
++const device uchar* ws = (const device uchar*)w + size_t(out_row) * K + lane * VPT;
++const device T* sp = sc + size_t(out_row) * groups + lane / (GS / VPT);
++const device T* bp = bi + size_t(out_row) * groups + lane / (GS / VPT);
++const device T* xp[NV];
++for (int v = 0; v < NV; ++v) xp[v] = x + size_t(min(vec0 + uint(v), uint(M - 1))) * K + lane * VPT;
++float result[NV][2] = {};
++int k = 0;
++for (; k < (FAST ? K : K - BLOCK); k += BLOCK) {
++  float xt[NV][VPT];
++  float sums[NV] = {};
++  for (int v = 0; v < NV; ++v) {
++    for (int i = 0; i < VPT; ++i) { sums[v] += xp[v][i]; xt[v][i] = xp[v][i]; }
++  }
++  for (int row = 0; row < 2; ++row) {
++    uchar codes[VPT];
++    for (int i = 0; i < VPT; ++i) codes[i] = ws[row * K + i];
++    const float scale = sp[row * groups];
++    const float bias = bp[row * groups];
++    for (int v = 0; v < NV; ++v) {
++      float accum = 0.0f;
++      for (int i = 0; i < VPT; ++i) accum += xt[v][i] * codes[i];
++      result[v][row] += scale * accum + sums[v] * bias;
++    }
++  }
++  ws += BLOCK;
++  sp += BLOCK / GS;
++  bp += BLOCK / GS;
++  for (int v = 0; v < NV; ++v) xp[v] += BLOCK;
++}
++if (!FAST) {
++  const int remaining = clamp(K - k - int(lane) * VPT, 0, VPT);
++  if (remaining > 0) {
++    float xt[NV][VPT];
++    float sums[NV] = {};
++    for (int v = 0; v < NV; ++v) {
++      for (int i = 0; i < remaining; ++i) { sums[v] += xp[v][i]; xt[v][i] = xp[v][i]; }
++    }
++    for (int row = 0; row < 2; ++row) {
++      uchar codes[VPT];
++      for (int i = 0; i < remaining; ++i) codes[i] = ws[row * K + i];
++      const float scale = sp[row * groups];
++      const float bias = bp[row * groups];
++      for (int v = 0; v < NV; ++v) {
++        float accum = 0.0f;
++        for (int i = 0; i < remaining; ++i) accum += xt[v][i] * codes[i];
++        result[v][row] += scale * accum + sums[v] * bias;
++      }
++    }
++  }
++}
++for (int v = 0; v < NV; ++v) {
++  for (int row = 0; row < 2; ++row) {
++    const float value = simd_sum(result[v][row]);
++    if (lane == 0 && vec0 + uint(v) < uint(M)) y[size_t(vec0 + uint(v)) * N + out_row + row] = T(value);
++  }
++})SUSHIBODY";
++    if(source!=expected || !header.empty() || !ensure_row_contiguous || atomic_outputs)
++      throw std::runtime_error("qmv8SG2 actual source/flags mismatch; no substitution");
++    auto candidate=mlx::core::fast::metal_kernel(name+"_sg2",input_names,output_names,alternative,header,ensure_row_contiguous,atomic_outputs);
++    mlx::core::fast::CustomKernelFunction selected=[standard,candidate](
++        const std::vector<mlx::core::array>& in,const std::vector<mlx::core::Shape>& shapes,
++        const std::vector<mlx::core::Dtype>& types,std::tuple<int,int,int> grid,std::tuple<int,int,int> tg,
++        std::vector<std::pair<std::string,mlx::core::fast::TemplateArg>> args,
++        std::optional<float> init,bool verbose,mlx::core::StreamOrDevice stream) {
++      int m=0,k=0,n=0;
++      if(in.size()==6 && in[0].ndim()>=2 && in[0].ndim()<=8 && in[1].ndim()==2) {k=in[0].shape().back();if(k>0)m=int(in[0].size()/k);n=in[1].shape(0);}
++      auto arg=[&](const std::string& name) {for(const auto& p:args)if(p.first==name)if(auto v=std::get_if<int>(&p.second))return *v;return -1;};
++      bool pair=(k==2560 && (n==6144 || n==10240 || n==12288)) || (k==6144 && n==2560);
++      bool admit=pair && m>=2 && m<=4 && in[1].shape(1)==k/4 && in[0].dtype()==mlx::core::bfloat16 &&
++        in[1].dtype()==mlx::core::uint32 && in[2].shape()==mlx::core::Shape({n,k/64}) && in[3].shape()==in[2].shape() &&
++        arg("M")==m && arg("NV")==m && arg("GS")==64 && arg("FAST")==1 &&
++        grid==std::make_tuple(32,(n/8)*2,1) && tg==std::make_tuple(32,2,1);
++      if(admit) {
++        return candidate(in,shapes,types,std::make_tuple(32,(n/8)*4,1),std::make_tuple(32,4,1),args,init,verbose,stream);
++      }
++      return standard(in,shapes,types,grid,tg,args,init,verbose,stream);
++    };
++    return mlx_fast_metal_kernel({new mlx_fast_metal_kernel_cpp_(selected)});
++  }
++  return mlx_fast_metal_kernel({new mlx_fast_metal_kernel_cpp_(standard)});
+ }
+ 
+ extern "C" mlx_fast_metal_kernel mlx_fast_metal_kernel_new(
